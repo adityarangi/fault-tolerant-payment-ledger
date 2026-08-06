@@ -1,0 +1,17 @@
+# Build output
+/bin/
+*.exe
+
+# Local environment — never commit real credentials
+.env
+.env.local
+
+# Test and coverage artefacts
+*.out
+*.test
+coverage.*
+
+# Editor and OS noise
+.idea/
+.vscode/
+.DS_Store

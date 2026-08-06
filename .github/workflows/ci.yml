@@ -1,0 +1,145 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  GO_VERSION: "1.24"
+
+jobs:
+  lint:
+    name: Lint and vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l $(find . -name '*.go'))
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        run: |
+          go vet ./...
+          go vet -tags=integration ./...
+
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+
+      - name: git diff --check
+        run: git diff --check
+
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: go build ./...
+      - run: go test -count=1 ./...
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ledger
+          POSTGRES_PASSWORD: ledger
+          POSTGRES_DB: ledger
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ledger -d ledger"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      # Kafka runs as a plain container rather than a service container so it
+      # can advertise a listener the test process can reach.
+      - name: Start Kafka
+        run: |
+          docker run -d --name kafka -p 9092:9092 \
+            -e KAFKA_NODE_ID=1 \
+            -e KAFKA_PROCESS_ROLES=broker,controller \
+            -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
+            -e KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093 \
+            -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092 \
+            -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+            -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+            -e KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
+            -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+            -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 \
+            -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
+            -e KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0 \
+            apache/kafka:3.9.0
+          for i in $(seq 1 60); do
+            if docker exec kafka /opt/kafka/bin/kafka-topics.sh \
+                 --bootstrap-server localhost:9092 --list >/dev/null 2>&1; then
+              echo "kafka ready"; exit 0
+            fi
+            sleep 2
+          done
+          docker logs kafka; exit 1
+
+      - name: Verify migrations apply and revert
+        env:
+          LEDGER_DATABASE_URL: postgres://ledger:ledger@localhost:5432/ledger?sslmode=disable
+        run: |
+          go run ./cmd/migrate -direction up
+          go run ./cmd/migrate -direction status
+          go run ./cmd/migrate -direction down
+          go run ./cmd/migrate -direction up
+
+      - name: Integration tests
+        env:
+          LEDGER_TEST_INTEGRATION: "1"
+          LEDGER_DATABASE_URL: postgres://ledger:ledger@localhost:5432/ledger?sslmode=disable
+          LEDGER_REDIS_ADDR: localhost:6379
+          LEDGER_KAFKA_BROKERS: localhost:9092
+        run: go test -tags=integration -count=1 -timeout=15m ./tests/...
+
+      - name: Race detector
+        env:
+          LEDGER_TEST_INTEGRATION: "1"
+          LEDGER_DATABASE_URL: postgres://ledger:ledger@localhost:5432/ledger?sslmode=disable
+          LEDGER_REDIS_ADDR: localhost:6379
+          LEDGER_KAFKA_BROKERS: localhost:9092
+        run: go test -race -tags=integration -count=1 -timeout=20m ./...
+
+  smoke:
+    name: Docker Compose smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and smoke test the stack
+        run: ./scripts/smoke.sh
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs --tail=100
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

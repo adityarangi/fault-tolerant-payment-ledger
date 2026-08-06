@@ -1,0 +1,41 @@
+# golangci-lint configuration (schema v2).
+version: "2"
+
+run:
+  timeout: 5m
+  # Integration tests live behind a build tag; lint them too.
+  build-tags:
+    - integration
+
+linters:
+  enable:
+    - bodyclose
+    - goconst
+    - misspell
+    - revive
+    - unconvert
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+    goconst:
+      min-occurrences: 4
+    misspell:
+      # No locale is pinned on purpose: PostgreSQL error names such as
+      # "serialization_failure" are fixed vocabulary, not spelling choices.
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+
+  exclusions:
+    rules:
+      # Table-driven tests repeat literals constantly; that is fine.
+      - path: _test\.go
+        linters:
+          - goconst
+          - errcheck
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

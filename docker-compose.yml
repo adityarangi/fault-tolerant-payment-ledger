@@ -1,0 +1,157 @@
+# Local infrastructure for the fault-tolerant payment ledger.
+#
+#   docker compose up --build
+#
+# Brings up PostgreSQL, Kafka (KRaft, no ZooKeeper), Redis, the API, both
+# workers and the example webhook receiver.
+
+name: payment-ledger
+
+x-ledger-env: &ledger-env
+  LEDGER_DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
+  LEDGER_REDIS_ADDR: redis:6379
+  LEDGER_KAFKA_BROKERS: kafka:29092
+  LEDGER_WEBHOOK_ENDPOINTS: http://example-webhook:9090/webhook
+  LEDGER_LOG_LEVEL: info
+  # Failpoints are enabled locally so the failure-injection demos work. They
+  # are off by default everywhere else and must never be enabled in production.
+  LEDGER_FAILPOINTS_ENABLED: "true"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ledger
+      POSTGRES_PASSWORD: ledger
+      POSTGRES_DB: ledger
+    command:
+      # A little extra headroom for the concurrency tests.
+      - "postgres"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "log_lock_waits=on"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledger -d ledger"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Single-node Kafka in KRaft mode: no ZooKeeper, and one container is plenty
+  # for exercising at-least-once delivery locally.
+  kafka:
+    image: apache/kafka:3.9.0
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      # PLAINTEXT is for in-network clients, EXTERNAL for the host.
+      KAFKA_LISTENERS: PLAINTEXT://:29092,CONTROLLER://:9093,EXTERNAL://:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # No rebalance delay so the webhook consumer group forms immediately.
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_NUM_PARTITIONS: "3"
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:29092 --list || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+
+  migrate:
+    build: .
+    entrypoint: ["/usr/local/bin/migrate", "-direction", "up"]
+    environment:
+      <<: *ledger-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+
+  api:
+    build: .
+    entrypoint: ["/usr/local/bin/api"]
+    environment:
+      <<: *ledger-env
+      LEDGER_HTTP_ADDR: ":8080"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health/ready"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  outbox-worker:
+    build: .
+    entrypoint: ["/usr/local/bin/outbox-worker"]
+    environment:
+      <<: *ledger-env
+      LEDGER_METRICS_ADDR: ":8081"
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  webhook-worker:
+    build: .
+    entrypoint: ["/usr/local/bin/webhook-worker"]
+    environment:
+      <<: *ledger-env
+      LEDGER_METRICS_ADDR: ":8082"
+    ports:
+      - "8082:8082"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  example-webhook:
+    build: .
+    entrypoint: ["/usr/local/bin/example-webhook"]
+    environment:
+      EXAMPLE_WEBHOOK_ADDR: ":9090"
+    ports:
+      - "9090:9090"
+
+volumes:
+  postgres-data:
