@@ -30,9 +30,14 @@ jobs:
           go vet ./...
           go vet -tags=integration ./...
 
-      - uses: golangci/golangci-lint-action@v6
+      # Pinned to an exact golangci-lint release rather than "latest": the
+      # config uses the v2 schema, and action v6's "latest" resolves to the
+      # v1 line, which cannot parse it. The pin also keeps CI on the same
+      # version developers run locally, so lint results cannot diverge.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.12.2
           args: --timeout=5m
 
       - name: git diff --check

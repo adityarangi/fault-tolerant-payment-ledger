@@ -11,6 +11,9 @@ linters:
   enable:
     - bodyclose
     - goconst
+    # misspell runs with its defaults: no locale is pinned on purpose, because
+    # PostgreSQL error names such as "serialization_failure" are fixed
+    # vocabulary rather than spelling choices.
     - misspell
     - revive
     - unconvert
@@ -20,9 +23,6 @@ linters:
       check-type-assertions: true
     goconst:
       min-occurrences: 4
-    misspell:
-      # No locale is pinned on purpose: PostgreSQL error names such as
-      # "serialization_failure" are fixed vocabulary, not spelling choices.
     revive:
       rules:
         - name: exported
