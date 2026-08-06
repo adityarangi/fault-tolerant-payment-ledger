@@ -1,6 +1,6 @@
 # Fault-Tolerant Payment Ledger
 
-**HackIllinois '25** · Go · PostgreSQL · Kafka · Redis
+ Go · PostgreSQL · Kafka · Redis
 
 A double-entry payment ledger built to keep its books correct while the
 infrastructure around it misbehaves. Money moves through one atomic PostgreSQL
